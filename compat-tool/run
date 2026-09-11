@@ -12,7 +12,7 @@
 #   QWILIGHT_LOG          log file (overwritten on every launch)
 #   QWILIGHT_WINEDEBUG    WINEDEBUG for the run (default -all: the fixme flood costs frame time)
 #   QWILIGHT_KEEP_STEAMAPPID=1   keep the Steam app id (needs a Steam client bridge, else the game exits)
-#   QWILIGHT_INPROC_SYNC=1       re-enable in-process synchronisation (hangs at boot on the dev machine)
+#   QWILIGHT_DISABLE_INPROC_SYNC=1  turn off in-process synchronisation (ntsync); on by default
 #   QWILIGHT_ONSCREEN_CHILD_GL=0 present the game's swapchain through the blit path instead of a subwindow
 #   QWILIGHT_PULSE_LATENCY       PulseAudio latency in ms (default 30)
 
@@ -39,7 +39,9 @@ case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
   *) export LANG=en_US.UTF-8; unset LC_ALL LC_CTYPE ;;
 esac
 export WINEPREFIX="$PREFIX"
-[ -n "$QWILIGHT_INPROC_SYNC" ] || export WINE_DISABLE_INPROC_SYNC=1
+# in-process synchronisation (ntsync) is on; wait completion packets on inproc objects go
+# through server-side waiters (FIXES.md "Boot hang"). QWILIGHT_DISABLE_INPROC_SYNC=1 turns it off.
+[ -z "$QWILIGHT_DISABLE_INPROC_SYNC" ] || export WINE_DISABLE_INPROC_SYNC=1
 export PULSE_LATENCY_MSEC="${QWILIGHT_PULSE_LATENCY:-30}"
 export WINEDEBUG="${QWILIGHT_WINEDEBUG:--all}"
 export WINE_X11_ONSCREEN_CHILD_GL="${QWILIGHT_ONSCREEN_CHILD_GL:-1}"

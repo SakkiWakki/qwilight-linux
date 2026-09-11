@@ -79,7 +79,25 @@ if ((first <= WM_INPUT) && (last >= WM_INPUT_DEVICE_CHANGE)) mask |= QS_RAWINPUT
 
 ---
 
-## 2026-09-03 — Boot hang (diagnosed, worked around, not yet fixed)
+## 2026-09-11 — Boot hang with ntsync: FIXED (server-side waiters for wait completion packets)
+
+`server/inproc_sync.c`: `create_inproc_waiter()` / `cancel_inproc_waiter()` /
+`inproc_sync_try_wait()`; `server/completion.c`: `associate_completion_packet`
+takes the inproc branch, `cancel_completion_packet` cancels the waiter, the
+completion step is factored into `complete_packet()`. Design: a wait completion
+packet on an inproc object becomes a real ntsync waiter (which also gives the
+NT consuming semantics for auto-reset events and semaphores). A detached
+helper thread in wineserver blocks in `NTSYNC_IOC_WAIT_ANY` on a dup of the
+object fd with a per-waiter manual-reset event as the alert; it touches
+nothing but its fds and reports back through a pipe polled by the main loop.
+If a cancelled waiter loses the race and consumes a signal, the main thread
+puts it back (`EVENT_SET` / `SEM_RELEASE`). Verified 3/3 headless boots with
+ntsync, and `scratchpad/wcptest.c` (deferred auto-reset event, already
+signalled manual event, cancel, semaphore, thread exit, close-while-pending,
+16 packets on one event) passes in both sync modes. Run scripts no longer set
+`WINE_DISABLE_INPROC_SYNC`; `QWILIGHT_DISABLE_INPROC_SYNC=1` is the opt-out.
+
+## 2026-09-03 — Boot hang (diagnosed, worked around; fixed 2026-09-11, see above)
 
 **Symptom.** From run40 onward, launches hung on the splash at ~650 log lines.
 Intermittent-looking, but it is not a race.
@@ -92,8 +110,8 @@ decisive:
 | in-process sync (default) | 5 | 0 |
 | `WINE_DISABLE_INPROC_SYNC=1` | 5 | 5 |
 
-**Workaround.** Set `WINE_DISABLE_INPROC_SYNC=1`. This is why the run command
-above sets it.
+**Workaround (superseded).** Set `WINE_DISABLE_INPROC_SYNC=1`. The run
+scripts did this until the 2026-09-11 fix.
 
 **Where the real fix belongs.** The hung main thread sits in a two-handle
 `WaitForMultipleObjects` inside `dwmcorei` (`CConnection::Initialize`, reached

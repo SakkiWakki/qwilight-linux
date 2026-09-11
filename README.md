@@ -83,7 +83,7 @@ canvas does not work on Wine), then in the game's properties choose compatibilit
 | `QWILIGHT_WINEDEBUG=warn+module,+timestamp %command%` | A Wine log in `compat-tool/qwilight-wine.log` (default is silent; the log is overwritten per launch). |
 | `WINE_WHEEL_SCALE=5 %command%` | Windows-like wheel scrolling amount. |
 | `QWILIGHT_KEEP_STEAMAPPID=1 %command%` | Keep the Steam app id (the game will exit unless a Steam client bridge exists). |
-| `QWILIGHT_INPROC_SYNC=1 %command%` | Re-enable in-process synchronisation (ntsync); hangs at boot here. |
+| `QWILIGHT_DISABLE_INPROC_SYNC=1 %command%` | Turn off in-process synchronisation (ntsync), which is on by default. |
 
 The game's data (settings, chart database, skins) lives in `[user]/` next to `Qwilight.exe`, as on
 Windows. If a launch exits at once with no window, delete a stale `[user]/Qwilight.#` left by a

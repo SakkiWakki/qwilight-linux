@@ -30331,6 +30331,186 @@ index cb0cc8c2..18c8363e 100644
 +#define IWineMediaSourceInternal_get_stream(p,a,b) (p)->lpVtbl->get_stream(p,a,b)
  
  #endif
+diff --git a/server/completion.c b/server/completion.c
+index 0ae646a1..a69829e7 100644
+--- a/server/completion.c
++++ b/server/completion.c
+@@ -84,6 +84,7 @@ struct completion_packet
+     struct object      obj;                       /* object header */
+     struct list        entry;                     /* list entry in the target object wait completion packet queue */
+     struct object     *target;                    /* target object this packet waits for */
++    struct inproc_waiter *waiter;                 /* server-side waiter when the target is an inproc sync */
+     struct completion *completion;                /* completion object */
+     apc_param_t        ckey;                      /* key context */
+     apc_param_t        cvalue;                    /* apc context */
+@@ -335,6 +336,7 @@ static bool completion_packet_init( struct object *obj, const void *init_data )
+     struct completion_packet *packet = (struct completion_packet *)obj;
+ 
+     packet->target = NULL;
++    packet->waiter = NULL;
+     packet->completion = NULL;
+     packet->ckey = 0;
+     packet->cvalue = 0;
+@@ -351,10 +353,10 @@ static void completion_packet_dump( struct object *obj, int verbose )
+ 
+     assert( obj->ops == &completion_packet_ops );
+     fprintf( stderr, "WaitCompletionPacket target=%p completion=%p ckey=%llx cvalue=%llx "
+-             "information=%llx status=%#x in_target_packet_queue=%d in_completion_queue=%d\n",
++             "information=%llx status=%#x in_target_packet_queue=%d in_completion_queue=%d waiter=%p\n",
+              packet->target, packet->completion, (long long unsigned int)packet->ckey,
+              (long long unsigned int)packet->cvalue, (long long unsigned int)packet->information,
+-             packet->status, packet->in_target_packet_queue, packet->in_completion_queue );
++             packet->status, packet->in_target_packet_queue, packet->in_completion_queue, packet->waiter );
+ }
+ 
+ static struct completion_packet *get_completion_packet_obj( struct process *process,
+@@ -364,6 +366,17 @@ static struct completion_packet *get_completion_packet_obj( struct process *proc
+     return (struct completion_packet *)get_handle_obj( process, handle, access, &completion_packet_ops );
+ }
+ 
++/* queue a packet whose target has become signaled to its completion port */
++static void complete_packet( struct completion_packet *packet )
++{
++    assert( !packet->in_completion_queue );
++    assert( packet->completion );
++
++    packet->in_completion_queue = 1;
++    add_completion( packet->completion, packet->ckey, packet->cvalue, packet->status,
++                    packet->information, packet );
++}
++
+ /* try to wake up completion packets in the object when it's signaled */
+ void wake_up_completion_packets( struct object *obj )
+ {
+@@ -379,19 +392,29 @@ void wake_up_completion_packets( struct object *obj )
+     {
+         assert( packet->in_target_packet_queue );
+         assert( packet->target );
+-        assert( !packet->in_completion_queue );
+-        assert( packet->completion );
+ 
+         list_remove( &packet->entry );
+         release_object( packet->target );
+         packet->in_target_packet_queue = 0;
+         packet->target = NULL;
+-        packet->in_completion_queue = 1;
+-        add_completion( packet->completion, packet->ckey, packet->cvalue, packet->status,
+-                        packet->information, packet );
++        complete_packet( packet );
+     }
+ }
+ 
++/* the server-side waiter on an inproc target finished; runs on the main thread */
++static void inproc_packet_signaled( void *private, int signaled )
++{
++    struct completion_packet *packet = private;
++
++    assert( packet->waiter );
++    assert( packet->target );
++
++    packet->waiter = NULL;
++    release_object( packet->target );
++    packet->target = NULL;
++    if (signaled) complete_packet( packet );
++}
++
+ static void cancel_completion_packet( struct completion_packet *packet )
+ {
+     struct comp_msg *comp_msg;
+@@ -403,6 +426,13 @@ static void cancel_completion_packet( struct completion_packet *packet )
+         packet->in_target_packet_queue = 0;
+     }
+ 
++    if (packet->waiter)
++    {
++        assert( packet->target );
++        cancel_inproc_waiter( packet->waiter );
++        packet->waiter = NULL;
++    }
++
+     if (packet->in_completion_queue)
+     {
+         assert( packet->completion );
+@@ -596,7 +626,7 @@ DECL_HANDLER(associate_completion_packet)
+     if (!packet)
+         return;
+ 
+-    if (packet->in_target_packet_queue || packet->in_completion_queue)
++    if (packet->in_target_packet_queue || packet->in_completion_queue || packet->waiter)
+     {
+         release_object( packet );
+         set_error( STATUS_INVALID_PARAMETER_1 );
+@@ -633,6 +663,7 @@ DECL_HANDLER(associate_completion_packet)
+     assert( !packet->in_completion_queue );
+     assert( !packet->target );
+     assert( !packet->in_target_packet_queue );
++    assert( !packet->waiter );
+ 
+     packet->completion = (struct completion *)grab_object( completion );
+     packet->ckey = req->ckey;
+@@ -640,22 +671,47 @@ DECL_HANDLER(associate_completion_packet)
+     packet->information = req->information;
+     packet->status = req->status;
+ 
+-    if (is_obj_signaled( target ))
++    sync = get_obj_sync( target );
++    if (is_inproc_sync( sync ))
++    {
++        /* the server never sees signals on an inproc sync: poll it now, and otherwise
++         * park a server-side waiter on it (see inproc_sync.c) */
++        int signaled = inproc_sync_try_wait( sync );
++
++        if (signaled > 0)
++        {
++            complete_packet( packet );
++            reply->already_signaled = 1;
++        }
++        else if (signaled < 0)
++        {
++            set_error( STATUS_UNSUCCESSFUL );
++        }
++        else if ((packet->waiter = create_inproc_waiter( sync, inproc_packet_signaled, packet )))
++        {
++            packet->target = grab_object( target );
++            reply->already_signaled = 0;
++        }
++
++        if (get_error())
++        {
++            release_object( packet->completion );
++            packet->completion = NULL;
++        }
++    }
++    else if (is_obj_signaled( target ))
+     {
+-        packet->in_completion_queue = 1;
+-        add_completion( packet->completion, packet->ckey, packet->cvalue, packet->status,
+-                        packet->information, packet );
++        complete_packet( packet );
+         reply->already_signaled = 1;
+     }
+     else
+     {
+         packet->target = grab_object( target );
+-        sync = get_obj_sync( target );
+         list_add_tail( &sync->completion_packet_queue, &packet->entry );
+         packet->in_target_packet_queue = 1;
+-        release_object( sync );
+         reply->already_signaled = 0;
+     }
++    release_object( sync );
+     release_object( completion );
+     release_object( target );
+     release_object( packet );
+@@ -670,7 +726,7 @@ DECL_HANDLER(cancel_completion_packet)
+     if (!packet)
+         return;
+ 
+-    if (!packet->in_target_packet_queue && !packet->in_completion_queue)
++    if (!packet->in_target_packet_queue && !packet->in_completion_queue && !packet->waiter)
+     {
+         set_error( STATUS_CANCELLED );
+         release_object( packet );
 diff --git a/server/d3dkmt.c b/server/d3dkmt.c
 index eba03e01..601079ba 100644
 --- a/server/d3dkmt.c
@@ -30470,6 +30650,380 @@ index eba03e01..601079ba 100644
 +        reply->section = alloc_handle( current->process, composition->section, SECTION_MAP_READ | SECTION_QUERY, 0 );
      release_object( composition );
  }
+diff --git a/server/inproc_sync.c b/server/inproc_sync.c
+index 60c16a0f..db0bc192 100644
+--- a/server/inproc_sync.c
++++ b/server/inproc_sync.c
+@@ -23,6 +23,11 @@
+ #include <assert.h>
+ #include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#ifdef HAVE_POLL_H
++# include <poll.h>
++#endif
+ 
+ #include "ntstatus.h"
+ #include "winternl.h"
+@@ -39,7 +44,9 @@
+ 
+ #ifdef NTSYNC_IOC_EVENT_READ
+ 
++#include <errno.h>
+ #include <fcntl.h>
++#include <pthread.h>
+ #include <sys/ioctl.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+@@ -211,6 +218,301 @@ void abandon_inproc_mutexes( thread_id_t tid )
+         ioctl( mutex->fd, NTSYNC_IOC_MUTEX_KILL, &tid );
+ }
+ 
++int is_inproc_sync( struct object *obj )
++{
++    return obj->ops == &inproc_sync_ops;
++}
++
++/* non-blocking wait on an inproc sync from the server thread; consumes the signal like a waiter.
++ * returns 1 if signaled, 0 if not, -1 on error */
++int inproc_sync_try_wait( struct object *obj )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    struct ntsync_wait_args args = {0};
++    int ret;
++
++    assert( obj->ops == &inproc_sync_ops );
++
++    args.timeout = 0;  /* absolute CLOCK_MONOTONIC time in the past: poll only */
++    args.objs    = (uintptr_t)&sync->fd;
++    args.count   = 1;
++    args.owner   = getpid();
++    args.index   = ~0u;
++
++    do { ret = ioctl( get_inproc_device_fd(), NTSYNC_IOC_WAIT_ANY, &args ); }
++    while (ret < 0 && errno == EINTR);
++
++    if (!ret) return args.index == 0;
++    if (errno == ETIMEDOUT) return 0;
++    return -1;
++}
++
++/*
++ * Server-side waiters on inproc syncs.
++ *
++ * The server never observes signals on an inproc sync (the client sets it through the
++ * ntsync ioctl), so anything that needs to run server code when such an object becomes
++ * signaled (wait completion packets) blocks a helper thread in NTSYNC_IOC_WAIT_ANY on the
++ * object instead. The helper touches nothing but its own file descriptors: when the wait
++ * returns it writes the waiter pointer to a pipe that the main loop polls, and the
++ * callback runs on the main thread. A per-waiter manual-reset event in the wait's alert
++ * slot cancels it.
++ */
++
++struct inproc_waiter
++{
++    int                    device_fd;  /* ntsync device */
++    int                    obj_fd;     /* dup of the target fd, closed by the thread */
++    int                    alert_fd;   /* dup of the cancel event fd, closed by the thread */
++    unsigned int           owner;      /* owner id passed to the wait */
++    struct inproc_sync    *sync;       /* target sync (referenced) */
++    struct inproc_sync    *alert;      /* cancel event (referenced) */
++    int                    cancelled;  /* set by the main thread */
++    int                    error;      /* errno from the wait, or 0 */
++    unsigned int           index;      /* wait result index */
++    inproc_waiter_callback callback;
++    void                  *private;
++};
++
++struct inproc_waiter_queue
++{
++    struct object  obj;         /* object header */
++    struct fd     *fd;          /* read end of the notification pipe */
++    int            pipe_write;  /* write end, used by helper threads */
++};
++
++static void inproc_waiter_queue_dump( struct object *obj, int verbose );
++static void inproc_waiter_queue_destroy( struct object *obj );
++static void inproc_waiter_queue_poll_event( struct fd *fd, int event );
++
++static const struct object_ops inproc_waiter_queue_ops =
++{
++    .size    = sizeof(struct inproc_waiter_queue),
++    .type    = &no_type,
++    .dump    = inproc_waiter_queue_dump,
++    .destroy = inproc_waiter_queue_destroy,
++};
++
++static const struct fd_ops inproc_waiter_queue_fd_ops =
++{
++    .poll_event = inproc_waiter_queue_poll_event,
++};
++
++static struct inproc_waiter_queue *waiter_queue;
++
++static void inproc_waiter_queue_dump( struct object *obj, int verbose )
++{
++    struct inproc_waiter_queue *queue = (struct inproc_waiter_queue *)obj;
++    fprintf( stderr, "Inproc waiter queue fd=%p\n", queue->fd );
++}
++
++static void inproc_waiter_queue_destroy( struct object *obj )
++{
++    struct inproc_waiter_queue *queue = (struct inproc_waiter_queue *)obj;
++    if (queue->fd) release_object( queue->fd );
++    close( queue->pipe_write );
++}
++
++static void free_inproc_waiter( struct inproc_waiter *waiter )
++{
++    release_object( waiter->alert );
++    release_object( waiter->sync );
++    free( waiter );
++}
++
++/* a helper thread finished its wait; runs on the main thread */
++static void inproc_waiter_finished( struct inproc_waiter *waiter )
++{
++    int signaled = !waiter->error && waiter->index == 0;
++
++    if (debug_level)
++        fprintf( stderr, "inproc_waiter_finished %p fd=%d signaled=%d cancelled=%d error=%d\n",
++                 waiter, waiter->sync->fd, signaled, waiter->cancelled, waiter->error );
++
++    if (waiter->cancelled)
++    {
++        /* the object won the race against the cancel alert and the wait consumed its
++         * signal; put it back so that nobody loses a wake-up */
++        if (signaled)
++        {
++            __u32 count;
++            switch (waiter->sync->type)
++            {
++            case INPROC_SYNC_SEMAPHORE:
++                count = 1;
++                ioctl( waiter->sync->fd, NTSYNC_IOC_SEM_RELEASE, &count );
++                break;
++            case INPROC_SYNC_MUTEX:  /* never a waiter target */
++                break;
++            default:  /* manual-reset events are unchanged by SET; auto-reset ones are restored */
++                ioctl( waiter->sync->fd, NTSYNC_IOC_EVENT_SET, &count );
++                break;
++            }
++        }
++    }
++    else
++    {
++        if (waiter->error)
++            fprintf( stderr, "wineserver: inproc waiter on fd %d failed: %s\n",
++                     waiter->sync->fd, strerror( waiter->error ) );
++        waiter->callback( waiter->private, signaled );
++    }
++    free_inproc_waiter( waiter );
++}
++
++static void inproc_waiter_queue_poll_event( struct fd *fd, int event )
++{
++    struct inproc_waiter_queue *queue = get_fd_user( fd );
++    struct inproc_waiter *waiter;
++    int ret;
++
++    if (event & (POLLERR | POLLHUP))
++    {
++        fprintf( stderr, "wineserver: Error on inproc waiter pipe\n" );
++        release_object( queue );
++        waiter_queue = NULL;
++        return;
++    }
++    if (!(event & POLLIN)) return;
++
++    for (;;)
++    {
++        ret = read( get_unix_fd( fd ), &waiter, sizeof(waiter) );
++        if (ret == sizeof(waiter)) inproc_waiter_finished( waiter );
++        else if (ret < 0 && errno == EINTR) continue;
++        else break;  /* EAGAIN: drained */
++    }
++}
++
++static struct inproc_waiter_queue *get_inproc_waiter_queue(void)
++{
++    struct inproc_waiter_queue *queue;
++    int fd[2];
++
++    if (waiter_queue) return waiter_queue;
++
++    if (pipe( fd ) == -1)
++    {
++        file_set_error();
++        return NULL;
++    }
++    fcntl( fd[0], F_SETFD, FD_CLOEXEC );
++    fcntl( fd[1], F_SETFD, FD_CLOEXEC );
++    fcntl( fd[0], F_SETFL, O_NONBLOCK );
++
++    if (!(queue = alloc_object( &inproc_waiter_queue_ops )))
++    {
++        close( fd[0] );
++        close( fd[1] );
++        return NULL;
++    }
++    queue->pipe_write = fd[1];
++    if (!(queue->fd = create_anonymous_fd( &inproc_waiter_queue_fd_ops, fd[0], &queue->obj, 0 )))
++    {
++        release_object( queue );
++        return NULL;
++    }
++    set_fd_events( queue->fd, POLLIN );
++    make_object_permanent( &queue->obj );
++    waiter_queue = queue;
++    return queue;
++}
++
++/* helper thread: touches only its own fds and the pipe */
++static void *inproc_waiter_thread( void *arg )
++{
++    struct inproc_waiter *waiter = arg;
++    struct ntsync_wait_args args = {0};
++    int pipe_write = waiter_queue->pipe_write;
++    int ret;
++
++    args.timeout = ~(__u64)0;
++    args.objs    = (uintptr_t)&waiter->obj_fd;
++    args.count   = 1;
++    args.owner   = waiter->owner;
++    args.index   = ~0u;
++    args.alert   = waiter->alert_fd;
++
++    do { ret = ioctl( waiter->device_fd, NTSYNC_IOC_WAIT_ANY, &args ); }
++    while (ret < 0 && errno == EINTR);
++
++    waiter->error = ret < 0 ? errno : 0;
++    waiter->index = args.index;
++
++    close( waiter->obj_fd );
++    close( waiter->alert_fd );
++
++    /* a pointer-sized write is below PIPE_BUF and therefore atomic */
++    do { ret = write( pipe_write, &waiter, sizeof(waiter) ); }
++    while (ret < 0 && errno == EINTR);
++    return NULL;
++}
++
++struct inproc_waiter *create_inproc_waiter( struct object *obj, inproc_waiter_callback callback, void *private )
++{
++    struct inproc_sync *sync = (struct inproc_sync *)obj;
++    struct inproc_waiter *waiter;
++    pthread_attr_t attr;
++    pthread_t thread;
++    int err;
++
++    assert( obj->ops == &inproc_sync_ops );
++
++    if (!get_inproc_waiter_queue()) return NULL;
++
++    if (!(waiter = mem_alloc( sizeof(*waiter) ))) return NULL;
++    memset( waiter, 0, sizeof(*waiter) );
++    waiter->device_fd = get_inproc_device_fd();
++    waiter->owner     = getpid();
++    waiter->callback  = callback;
++    waiter->private   = private;
++    waiter->obj_fd    = -1;
++    waiter->alert_fd  = -1;
++    waiter->sync      = (struct inproc_sync *)grab_object( sync );
++
++    if (!(waiter->alert = create_inproc_internal_sync( 1, 0 ))) goto error;
++
++    if ((waiter->obj_fd = fcntl( sync->fd, F_DUPFD_CLOEXEC, 0 )) == -1 ||
++        (waiter->alert_fd = fcntl( waiter->alert->fd, F_DUPFD_CLOEXEC, 0 )) == -1)
++    {
++        file_set_error();
++        goto error;
++    }
++
++    pthread_attr_init( &attr );
++    pthread_attr_setdetachstate( &attr, PTHREAD_CREATE_DETACHED );
++    err = pthread_create( &thread, &attr, inproc_waiter_thread, waiter );
++    pthread_attr_destroy( &attr );
++    if (err)
++    {
++        errno = err;
++        file_set_error();
++        goto error;
++    }
++
++    if (debug_level)
++        fprintf( stderr, "create_inproc_waiter %p fd=%d\n", waiter, sync->fd );
++    return waiter;
++
++error:
++    if (waiter->obj_fd != -1) close( waiter->obj_fd );
++    if (waiter->alert_fd != -1) close( waiter->alert_fd );
++    if (waiter->alert) release_object( waiter->alert );
++    release_object( waiter->sync );
++    free( waiter );
++    return NULL;
++}
++
++/* cancel a waiter; the struct is freed once the helper thread reports back and the
++ * callback is never invoked */
++void cancel_inproc_waiter( struct inproc_waiter *waiter )
++{
++    if (debug_level)
++        fprintf( stderr, "cancel_inproc_waiter %p fd=%d\n", waiter, waiter->sync->fd );
++    waiter->cancelled = 1;
++    signal_inproc_sync( waiter->alert );
++}
++
+ static int get_obj_inproc_sync( struct object *obj, int *type )
+ {
+     struct object *sync;
+@@ -272,6 +574,26 @@ void abandon_inproc_mutexes( thread_id_t tid )
+ {
+ }
+ 
++int is_inproc_sync( struct object *obj )
++{
++    return 0;
++}
++
++int inproc_sync_try_wait( struct object *obj )
++{
++    return -1;
++}
++
++struct inproc_waiter *create_inproc_waiter( struct object *obj, inproc_waiter_callback callback, void *private )
++{
++    set_error( STATUS_NOT_IMPLEMENTED );
++    return NULL;
++}
++
++void cancel_inproc_waiter( struct inproc_waiter *waiter )
++{
++}
++
+ static int get_obj_inproc_sync( struct object *obj, int *type )
+ {
+     return -1;
+diff --git a/server/object.h b/server/object.h
+index cd64a0cc..daf9018f 100644
+--- a/server/object.h
++++ b/server/object.h
+@@ -274,6 +274,14 @@ extern struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned
+ extern void abandon_inproc_mutexes( thread_id_t owner );
+ extern void signal_inproc_sync( struct inproc_sync *sync );
+ extern void reset_inproc_sync( struct inproc_sync *sync );
++extern int is_inproc_sync( struct object *obj );
++extern int inproc_sync_try_wait( struct object *obj );
++
++/* server-side waiter on an inproc sync (see inproc_sync.c) */
++struct inproc_waiter;
++typedef void (*inproc_waiter_callback)( void *private, int signaled );
++extern struct inproc_waiter *create_inproc_waiter( struct object *obj, inproc_waiter_callback callback, void *private );
++extern void cancel_inproc_waiter( struct inproc_waiter *waiter );
+ 
+ /* serial functions */
+ 
 diff --git a/server/protocol.def b/server/protocol.def
 index 699fd550..7e21cd26 100644
 --- a/server/protocol.def
