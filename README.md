@@ -26,7 +26,7 @@ LLMs are still not good enough to debug parts of this extension by clankselves!!
 | `compat-tool/` | A Steam compatibility tool that launches the game with the patched Wine. |
 | `setup/prefix-setup.sh` | Creates the Wine prefix: WebView2 runtime, DirectX shader compiler, icon fonts, animation manager registration. |
 | `docs/FIXES.md` | The running writeup of every problem found and how it was fixed or diagnosed (long, technical, in the order it happened). Written by an LLM and kept because I wanted a reference to see what potential work could be contributed to Wine upstream for Qwilight. Though some items may not be accurate and someone needs to yell at Yucky to clean it up himself when he has time. |
-| `tools/` | Headless test harness (Xvfb + llvmpipe scenarios with screenshots) and small probes. |
+| `tools/` | Headless test harness (Xvfb + llvmpipe scenarios with screenshots) and small probes. Intended to be used by an LLM but I've found some scripts pretty useful to run myself for debugging  |
 
 The Wine source itself is published as a fork branch: **`qwilight`** in
 [SakkiWakki/wine](https://github.com/SakkiWakki/wine). It is wine-11.16 + wine-staging + the
