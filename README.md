@@ -91,5 +91,4 @@ killed run.
 
 ## Diagnostics
 
-Every diagnostic in the Wine tree is gated by a `WINE_*` environment variable and listed in
-`docs/HANDOFF.md` under "Remove before any commit". You probably do not need to run any of those unless you want to help Yucky (the guy publishing this repo) debug.
+Every diagnostic in the Wine tree is gated by a `WINE_*` environment variable. You probably do not need to run any of those unless you want to help Yucky (the guy publishing this repo) debug.
