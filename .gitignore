@@ -1,0 +1,7 @@
+compat-tool/config.sh
+compat-tool/qwilight-wine.log
+setup/*.exe
+setup/*.ttf
+setup/*.TTF
+tools/*.exe
+__pycache__/

@@ -1,0 +1,4 @@
+# Copy to config.sh next to `run` to override the defaults.
+QWILIGHT_WINE_BUILD="$HOME/qwilight-linux/wine-build"
+QWILIGHT_PREFIX="$HOME/qwilight-linux/prefix"
+#QWILIGHT_LOG="$HOME/qwilight-linux/qwilight-wine.log"

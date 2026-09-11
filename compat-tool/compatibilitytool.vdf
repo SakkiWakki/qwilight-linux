@@ -1,0 +1,13 @@
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "qwilight-wine"
+    {
+      "install_path" "."
+      "display_name" "Qwilight Wine (qwilight-bringup)"
+      "from_oslist"  "windows"
+      "to_oslist"    "linux"
+    }
+  }
+}

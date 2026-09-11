@@ -1,0 +1,90 @@
+#!/bin/bash
+# Steam compatibility tool "Qwilight Wine": run the game with the patched Wine from the
+# qwilight-linux project instead of Proton.  Steam calls: run <verb> <exe> [args...]
+#   verbs: run | waitforexitandrun            -> launch
+#          getcompatpath <linux path>         -> path translation
+#          getnativepath <windows path>       -> path translation
+#
+# Configuration (all optional): compat-tool/config.sh next to this script, or environment
+# variables in the Steam launch options:
+#   QWILIGHT_WINE_BUILD   Wine build directory (contains wine and server/wineserver)
+#   QWILIGHT_PREFIX       Wine prefix created by setup/prefix-setup.sh
+#   QWILIGHT_LOG          log file (overwritten on every launch)
+#   QWILIGHT_WINEDEBUG    WINEDEBUG for the run (default -all: the fixme flood costs frame time)
+#   QWILIGHT_KEEP_STEAMAPPID=1   keep the Steam app id (needs a Steam client bridge, else the game exits)
+#   QWILIGHT_INPROC_SYNC=1       re-enable in-process synchronisation (hangs at boot on the dev machine)
+#   QWILIGHT_ONSCREEN_CHILD_GL=0 present the game's swapchain through the blit path instead of a subwindow
+#   QWILIGHT_PULSE_LATENCY       PulseAudio latency in ms (default 30)
+
+TOOLDIR="$(cd "$(dirname "$0")" && pwd)"
+[ -f "$TOOLDIR/config.sh" ] && . "$TOOLDIR/config.sh"
+WINE_BUILD="${QWILIGHT_WINE_BUILD:-$HOME/qwilight-linux/wine-build}"
+PREFIX="${QWILIGHT_PREFIX:-$HOME/qwilight-linux/prefix}"
+LOG="${QWILIGHT_LOG:-$TOOLDIR/qwilight-wine.log}"
+WINE="$WINE_BUILD/wine"
+WINESERVER="$WINE_BUILD/server/wineserver"
+
+verb="$1"; shift
+
+# Proton-era variables from Steam launch options or the client must not leak into this Wine:
+# a WINEDLLOVERRIDES that disables dcomp takes Microsoft.UI.Xaml down with it.
+unset WINEDLLOVERRIDES WINEDLLPATH WINEESYNC WINEFSYNC WINE_LARGE_ADDRESS_AWARE DXVK_HUD PROTON_LOG
+# Steam's gameoverlayrenderer.so preload makes glvnd fall back to Mesa llvmpipe in this Wine.
+# No overlay, real GPU.
+unset LD_PRELOAD
+# Steam starts the game without LANG/LC_*; Wine then converts Unix file names through the ASCII
+# table and every non-ASCII name (Japanese difficulty tables, skins) can no longer be opened.
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+  *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ;;
+  *) export LANG=en_US.UTF-8; unset LC_ALL LC_CTYPE ;;
+esac
+export WINEPREFIX="$PREFIX"
+[ -n "$QWILIGHT_INPROC_SYNC" ] || export WINE_DISABLE_INPROC_SYNC=1
+export PULSE_LATENCY_MSEC="${QWILIGHT_PULSE_LATENCY:-30}"
+export WINEDEBUG="${QWILIGHT_WINEDEBUG:--all}"
+export WINE_X11_ONSCREEN_CHILD_GL="${QWILIGHT_ONSCREEN_CHILD_GL:-1}"
+
+case "$verb" in
+  getcompatpath) exec "$WINE" winepath -w "$1" 2>/dev/null ;;
+  getnativepath) exec "$WINE" winepath -u "$1" 2>/dev/null ;;
+  run|waitforexitandrun) ;;
+  *) echo "qwilight-wine: unknown verb $verb" >&2; exit 1 ;;
+esac
+
+exe="$1"; shift
+if [ ! -x "$WINE" ]; then
+  echo "qwilight-wine: no wine at $WINE (set QWILIGHT_WINE_BUILD)" >&2
+  exit 1
+fi
+cd "$(dirname "$exe")" || exit 1
+# stale single-instance lock from a killed run: the next launch would exit silently
+rm -f "$(dirname "$exe")/yucky/Qwilight.#"
+# The beta's ValveSystem calls SteamClient.Init() whenever SteamAppId is set and exits on
+# failure. Plain Wine has no Steam client bridge (Proton's lsteamclient), so hide the id: the
+# game then runs without Steam features (cloud, friends, beta-branch name).
+if [ -z "$QWILIGHT_KEEP_STEAMAPPID" ]; then unset SteamAppId SteamGameId SteamOverlayGameId; fi
+
+{
+  echo "=== $(date) verb=$verb exe=$exe args=$*"
+  echo "--- wine: $WINE prefix: $PREFIX"
+  "$WINE" "$exe" "$@"
+  rc=$?
+  echo "=== $(date) Qwilight.exe exited with status $rc"
+  # Steam keeps showing "running" while anything from this process tree is alive. The game's
+  # helpers (RestartAgent.exe, ffmpeg.exe, winedbg after a crash) and the prefix's service
+  # processes can outlive it; give them a few seconds, then end the prefix session - unless
+  # another Qwilight.exe is running in it.
+  timeout 10 "$WINESERVER" -w 2>/dev/null
+  left=$(ps -eo pid,etime,args --no-headers | grep -E "$PREFIX|\.exe" | grep -v -E "grep|steam|reaper" )
+  if [ -n "$left" ]; then
+    echo "--- processes still alive after exit:"; echo "$left"
+    if echo "$left" | grep -q 'Qwilight.exe'; then
+      echo "--- another Qwilight.exe is running in the prefix; leaving the session alone"
+    else
+      echo "--- ending the prefix session"
+      "$WINESERVER" -k 2>/dev/null
+    fi
+  fi
+  echo "=== $(date) launcher done"
+  exit $rc
+} > "$LOG" 2>&1
