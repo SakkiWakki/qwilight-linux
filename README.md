@@ -1,50 +1,31 @@
 # qwilight-linux
 
-Unofficial, community-made way to run **[Qwilight](https://store.steampowered.com/app/1910130/)**
+Unofficial way to run **[Qwilight](https://store.steampowered.com/app/1910130/)**
 (the 2.0 beta, WinUI 3 / Windows App SDK) on Linux through a patched Wine.
 
-This is **not** an official Qwilight project. Report issues here in the repo directly.
+This is **not** an official Qwilight project. Report issues here in the repo directly!
 
-It is a **prototype** built and tested on exactly one machine (Arch-based, NVIDIA RTX 5090 with the
-proprietary driver, Ryzen 9800X3D, KDE Plasma on Wayland/XWayland). It contains hacks and
-diagnostics, it was developed with the help of an AI assistant against this one game, and none of
-it can be sent to Wine upstream in this form. Expect rough edges.
+This was built and tested on only my machine (Arch, 5090 with the proprietary driver, 9800X3D, KDE Plasma on Wayland). Since it was developed with the help of an LLM, so changes made here can only really serve as a **prototype** for any future work on Wine's actual upstream (and of course for playing Qwilight in the meantime). For example, some of the code also contains weird shortcuts that could potentially cause race conditions and deadlocks in e.g. the rendering loop. My goals were to just learn about aspects of Windows internals for my other GUI projects while being able to play Qwilight comfortably on Linux.
 
-## What works
+Fun fact:
+LLMs are still not good enough to debug parts of this extension by clankselves!!!
 
-* The game boots to song select, loads the library and skins, plays charts with keyboard input,
-  renders BGA/skin videos, and its settings, difficulty tables, profile menu and mouse wheel
-  scrolling work.
-* The song downloader (F7), help pages and level votes: the embedded WebView2 pages render
-  (Chromium's frames cross into the game through a custom transport, see `docs/FIXES.md`,
-  "F7 downloader").
-* Web traffic in general (`windows.web.http` on winhttp).
+## Stuff that needs work
 
-## What does not (yet)
-
-* Steam features are off: plain Wine has no Steam client bridge, so the launcher hides the app id
-  (the game would otherwise exit when `SteamClient.Init()` fails). No cloud saves, friends or
-  overlay.
-* Start-up is slow (a minute or more with a large library) and the UI can stall while the library
-  loads. Cause and a possible remedy are in `docs/FIXES.md` ("Thread priorities"): allow negative
-  niceness for your user (`/etc/security/limits.d/`, `<user> - nice -11`) so Wine can raise the
-  UI threads the way Windows does.
-* Full-screen toggling is unreliable; run windowed.
-* Mouse-wheel scrolling moves a fifth of the Windows amount; `WINE_WHEEL_SCALE=5` compensates.
-* Untested on AMD/Intel GPUs, on X11 sessions, and with any other distribution. The Vulkan
-  wined3d backend is not used; Wine's OpenGL path with the GPU compositor is.
-
-The complete list, with status, is in `docs/HANDOFF.md` ("Smaller open items").
+* Steam features are off: plain Wine has no Steam client bridge, I want to investigate porting over to Proton later after implementing 
+* Storage contention esp. on an HDD can cause massive slowdowns to the point where startup just displays nothing for an entire minute until the Window finally appears (only for the Beta though). If you don't see a window surface appear within at least 2-5 minutes you should open a bug report along with any information you can gather.
+* Full-screen toggling may be unreliable. It runs on my machine but I haven't tested it on vms or containers
+* Untested on AMD/Intel GPUs, on X11 sessions, and with any other distribution.
+* You need to source the Windows fonts for icons directly or make one yourself.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `wine/wine-qwilight.patch` | The last, uncommitted part of the Wine work as one diff against `wine/BASE_COMMIT` (a commit on the fork branch below). Kept here so the change is reviewable as a whole. |
-| `compat-tool/` | A Steam compatibility tool ("Qwilight Wine") that launches the game with the patched Wine. |
+| `wine/wine-qwilight.patch` | Serves as a diff to compare againist base wine |
+| `compat-tool/` | A Steam compatibility tool that launches the game with the patched Wine. |
 | `setup/prefix-setup.sh` | Creates the Wine prefix: WebView2 runtime, DirectX shader compiler, icon fonts, animation manager registration. |
-| `docs/FIXES.md` | The running writeup of every problem found and how it was fixed or diagnosed (long, technical, in the order it happened). |
-| `docs/HANDOFF.md` | State of the work, tooling, house rules and open items. Written for whoever continues it. |
+| `docs/FIXES.md` | The running writeup of every problem found and how it was fixed or diagnosed (long, technical, in the order it happened). Written by an LLM and kept because I wanted a reference to see what potential work could be contributed to Wine upstream for Qwilight. Though some items may not be accurate and someone needs to yell at Yucky to clean it up himself when he has time. |
 | `tools/` | Headless test harness (Xvfb + llvmpipe scenarios with screenshots) and small probes. |
 
 The Wine source itself is published as a fork branch: **`qwilight`** in
@@ -52,7 +33,7 @@ The Wine source itself is published as a fork branch: **`qwilight`** in
 bring-up commits + the patch above, i.e. exactly what `wine-qwilight.patch` applies to plus that
 patch.
 
-## Setup
+## Setup (written by a clanker)
 
 ### 1. Build the Wine fork
 
@@ -82,8 +63,7 @@ The script needs, in its directory or given on the command line:
   pages are WebView2. Version 152 was used here. The runtime's own `d3dcompiler_47.dll` is then
   copied into the prefix and used instead of Wine's (the WinUI compositor links shaders with an
   API Wine's compiler lacks).
-* `SegoeIcons.ttf`, `segmdl2.ttf`, `SEGUISYM.TTF` — Segoe Fluent Icons, Segoe MDL2 Assets and
-  Segoe UI Symbol, from a Windows installation's `C:\Windows\Fonts`. They are Microsoft's and
+* `SegoeIcons.ttf`, `segmdl2.ttf`, `SEGUISYM.TTF` from a Windows installation's `C:\Windows\Fonts`. They are Microsoft's and
   cannot be redistributed here; without them the UI shows boxes instead of icons. Do **not**
   install the Segoe UI text family, it breaks text layout (`docs/FIXES.md`, "Glyph findings").
 
@@ -105,22 +85,11 @@ canvas does not work on Wine), then in the game's properties choose compatibilit
 | `QWILIGHT_KEEP_STEAMAPPID=1 %command%` | Keep the Steam app id (the game will exit unless a Steam client bridge exists). |
 | `QWILIGHT_INPROC_SYNC=1 %command%` | Re-enable in-process synchronisation (ntsync); hangs at boot here. |
 
-The game's data (settings, chart database, skins) lives in `yucky/` next to `Qwilight.exe`, as on
-Windows. If a launch exits at once with no window, delete a stale `yucky/Qwilight.#` left by a
+The game's data (settings, chart database, skins) lives in `[user]/` next to `Qwilight.exe`, as on
+Windows. If a launch exits at once with no window, delete a stale `[user]/Qwilight.#` left by a
 killed run.
 
 ## Diagnostics
 
 Every diagnostic in the Wine tree is gated by a `WINE_*` environment variable and listed in
-`docs/HANDOFF.md` under "Remove before any commit". The ones that paid off most:
-`WINE_RO_DUMP_HRESULT=all` (every WinRT error the app raises, with its thread),
-`WINE_DUMP_BACKTRACE=<module>` (stack of every XAML failure capture), the compositor frame
-statistics, and for WebView2 the Chromium log/NetLog/DevTools switches described in
-`docs/FIXES.md` ("F7 downloader"). `tools/` has the headless harness the whole thing was developed
-with; it needs Xvfb, ImageMagick and python-xlib.
-
-## License
-
-The Wine patches are under Wine's license, the GNU LGPL 2.1 (`LICENSE`). The scripts and
-documents in this repository are under the same license. Qwilight itself is Taehui's; nothing of
-the game is included here.
+`docs/HANDOFF.md` under "Remove before any commit". You probably do not need to run any of those unless you want to help Yucky (the guy publishing this repo) debug.
